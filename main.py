@@ -36,7 +36,7 @@ MIN_ORDER_SIZE_BTC = 0.0002  # Minimum order size requirement
 # Trading configuration
 TRADE_THRESHOLD = 0.005  # Adjusted minimum percentage change to trigger a trade
 LOOKBACK_PERIOD = 5  # Number of past price points to analyze
-MIN_BALANCE_USD = 1.0  # Minimum equivalent value to trade
+MIN_BALANCE_USD = 10.0  # Minimum equivalent value to trade
 
 
 # Helper function to create signature
@@ -75,36 +75,7 @@ def initialize_portfolio():
         else:
             print("Not enough BTC to place the minimum order for all currencies.")
 
-# Place a market buy order
-def buy_currency(from_currency, to_currency, amount):
-    pair = f"{to_currency}{from_currency}".lower()
-    nonce, signature = create_signature()
-    payload = {
-        'key': API_KEY,
-        'signature': signature,
-        'nonce': nonce,
-        'amount': amount,
-    }
-    response = requests.post(f"{BASE_URL}/buy/market/{pair}/", data=payload)
-    result = response.json()
-    transaction_log.append({"action": "buy", "from": from_currency, "to": to_currency, "amount": amount, "result": result})
-    print(f"Buy order executed: {result}")
-    return result
-# Place a market sell order
-def sell_currency(from_currency, to_currency, amount):
-    pair = f"{to_currency}{from_currency}".lower()
-    nonce, signature = create_signature()
-    payload = {
-        'key': API_KEY,
-        'signature': signature,
-        'nonce': nonce,
-        'amount': round(amount, 8),  # Ensure max 8 decimal places
-    }
-    response = requests.post(f"{BASE_URL}/sell/market/{pair}/", data=payload)
-    result = response.json()
-    transaction_log.append({"action": "sell", "from": from_currency, "to": to_currency, "amount": amount, "result": result})
-    print(f"Sell order executed: {result}")
-    return result
+
 # Get total account value in USD
 def get_total_value_in_usd():
     balance = get_balance()
@@ -163,6 +134,48 @@ def get_usd_value(currency, amount):
         return amount * price
     return 0
 
+
+# Place a market buy order
+def buy_currency(from_currency, to_currency, amount):
+    pair = f"{to_currency}{from_currency}".lower()
+    amount = round(amount, 8)  # Ensure max 8 decimal places
+    if amount < MIN_BALANCE_USD:
+        print(f"Skipping buy: Amount {amount} is below minimum trade value.")
+        return None
+    nonce, signature = create_signature()
+    payload = {
+        'key': API_KEY,
+        'signature': signature,
+        'nonce': nonce,
+        'amount': amount,
+    }
+    response = requests.post(f"{BASE_URL}/buy/market/{pair}/", data=payload)
+    result = response.json()
+    transaction_log.append(
+        {"action": "buy", "from": from_currency, "to": to_currency, "amount": amount, "result": result})
+    print(f"Buy order executed: {result}")
+    return result
+
+
+# Place a market sell order
+def sell_currency(from_currency, to_currency, amount):
+    pair = f"{to_currency}{from_currency}".lower()
+    amount = round(amount, 8)  # Ensure max 8 decimal places
+    nonce, signature = create_signature()
+    payload = {
+        'key': API_KEY,
+        'signature': signature,
+        'nonce': nonce,
+        'amount': amount,
+    }
+    response = requests.post(f"{BASE_URL}/sell/market/{pair}/", data=payload)
+    result = response.json()
+    transaction_log.append(
+        {"action": "sell", "from": from_currency, "to": to_currency, "amount": amount, "result": result})
+    print(f"Sell order executed: {result}")
+    return result
+
+
 # Trading logic with validation of valid trading pairs
 def trading_loop():
     global prices, last_trade_time
@@ -199,33 +212,21 @@ def trading_loop():
                                      default=None)
                 best_currency = max(price_changes, key=price_changes.get)
 
-                # Ensure best currency is actually valid and tradable
-                if best_currency not in valid_currencies:
-                    print(f"Skipping trade: {best_currency} is not a valid trading currency.")
-                    best_currency = None
-
-                print(f"Worst performing currency in portfolio: {worst_currency} ({price_changes[worst_currency]:.4f})")
-                print(f"Best performing currency overall: {best_currency} ({price_changes[best_currency]:.4f})")
-
-                current_time = time.time()
-                if worst_currency and best_currency and price_changes[
-                    worst_currency] < -TRADE_THRESHOLD and balance.get(worst_currency, 0) > 0:
+                if worst_currency and best_currency and worst_currency in balance:
                     usd_value = get_usd_value(worst_currency, balance[worst_currency])
                     if usd_value >= MIN_BALANCE_USD:
-                        if current_time - last_trade_time >= trade_interval:
-                            print(f"Swapping {worst_currency} to {best_currency} for optimization.")
-                            sell_currency(worst_currency, "usd", balance[worst_currency])
-                            buy_currency("usd", best_currency, usd_value)
-                            last_trade_time = current_time  # Update last trade time
-                        else:
-                            print("Skipping trade: Trade interval not yet passed.")
+                        print(f"Swapping {worst_currency} to {best_currency} for optimization.")
+                        sell_currency(worst_currency, "usd", balance[worst_currency])
+                        balance = get_balance()  # Refresh balance after selling
+                        if "usd" in balance and balance["usd"] >= MIN_BALANCE_USD:
+                            buy_currency("usd", best_currency, balance["usd"])
+                        last_trade_time = time.time()
                     else:
                         print("Skipping trade: Insufficient balance for trading.")
-                else:
-                    print("No trade executed this cycle: Threshold not met or insufficient balance.")
         except Exception as e:
             print("Error in trading loop:", e)
         time.sleep(60)
+
 
 # Flask routes
 @app.route('/')
