@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Day Trader Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        h1 {
+            text-align: center;
+        }
+        canvas {
+            margin-top: 20px;
+        }
+        .balance {
+            font-size: 18px;
+            font-weight: bold;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>AI Day Trader Dashboard</h1>
+        <p class="balance">Account Balance: <span id="accountBalance">Loading...</span></p>
+        <p><strong>Latest Action:</strong> {{ latest_action }}</p>
+        <h2>Recent Prices</h2>
+        <canvas id="priceChart"></canvas>
+    </div>
+
+    <script>
+        const ctx = document.getElementById('priceChart').getContext('2d');
+        const priceChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'BTC/USD Prices',
+                    data: [],
+                    borderColor: 'rgba(75, 192, 192, 1)',
+                    borderWidth: 2,
+                    fill: false
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: {
+                    x: {
+                        title: {
+                            display: true,
+                            text: 'Time (last 20 updates)'
+                        }
+                    },
+                    y: {
+                        title: {
+                            display: true,
+                            text: 'Price (USD)'
+                        }
+                    }
+                }
+            }
+        });
+
+        function updateDashboard() {
+            fetch('/data')
+                .then(response => response.json())
+                .then(data => {
+                    // Update price chart
+                    const prices = data.prices;
+                    priceChart.data.labels = Array.from({ length: prices.length }, (_, i) => `T-${prices.length - i}`);
+                    priceChart.data.datasets[0].data = prices;
+                    priceChart.update();
+
+                    // Update balance
+                    document.getElementById("accountBalance").innerText = data.balance ? JSON.stringify(data.balance, null, 2) : "N/A";
+                });
+        }
+
+        setInterval(updateDashboard, 60000); // Update every minute
+        updateDashboard(); // Initial update
+    </script>
+</body>
+</html>
