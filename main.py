@@ -6,8 +6,9 @@ import json
 import os
 import numpy as np
 from dotenv import load_dotenv
-from flask import Flask, render_template, jsonify
+from flask import Flask, jsonify
 import threading
+from sklearn.ensemble import RandomForestRegressor
 
 # Load API keys from .env file
 load_dotenv("key.env")
@@ -15,232 +16,141 @@ API_KEY = os.getenv("BITSTAMP_API_KEY").strip()
 API_SECRET = os.getenv("BITSTAMP_API_SECRET").strip()
 CUSTOMER_ID = os.getenv("BITSTAMP_CUSTOMER_ID").strip()
 
-# Check if API keys are loaded correctly
 if not API_KEY or not API_SECRET or not CUSTOMER_ID:
     raise ValueError("API keys are missing. Please check your .env file.")
 
 BASE_URL = "https://www.bitstamp.net/api/v2"
 
 app = Flask(__name__)
-prices = {}  # Dictionary to store historical prices per currency
+prices = {}
 latest_action = "No action yet"
-nonce_counter = int(time.time() * 1000)  # Ensure unique nonce
-last_trade_time = 0  # Timestamp for last trade execution
-trade_interval = 1800  # Minimum time between trades (30 min)
-transaction_log = []  # Store transaction history
+nonce_counter = int(time.time() * 1000)
+transaction_log = []
+TRADE_THRESHOLD = 0.005
+LOOKBACK_PERIOD = 5
+ALLOWED_CURRENCIES = {"usd", "btc", "eth", "xrp", "sol", "usdc", "doge", "ada", "link"}
 
-# Initial portfolio setup
-INITIAL_CURRENCIES = ["eth", "ltc", "xrp", "ada"]  # Buy evenly among four currencies
-MIN_ORDER_SIZE_BTC = 0.0002  # Minimum order size requirement
+# AI Model for Predicting Market Trends
+class AICryptoManager:
+    def __init__(self):
+        self.model = RandomForestRegressor(n_estimators=100)
+        self.price_history = {}
 
-# Trading configuration
-TRADE_THRESHOLD = 0.005  # Adjusted minimum percentage change to trigger a trade
-LOOKBACK_PERIOD = 5  # Number of past price points to analyze
-MIN_BALANCE_USD = 10.0  # Minimum equivalent value to trade
+    def update_model(self, historical_data):
+        if len(historical_data) <= LOOKBACK_PERIOD:
+            return
+        X = np.array([historical_data[i:i+LOOKBACK_PERIOD] for i in range(len(historical_data)-LOOKBACK_PERIOD)])
+        y = np.array(historical_data[LOOKBACK_PERIOD:])
+        if len(X) > 0 and len(y) > 0:
+            self.model.fit(X, y.ravel())
+
+    def predict_next_move(self, recent_prices):
+        if len(recent_prices) < LOOKBACK_PERIOD:
+            return None
+        X = np.array(recent_prices[-LOOKBACK_PERIOD:]).reshape(1, -1)
+        return self.model.predict(X)[0]
 
 
-# Helper function to create signature
 def create_signature():
-    global nonce_counter
-    nonce_counter += 1
-    nonce = str(nonce_counter)
-    message = (nonce + CUSTOMER_ID + API_KEY).encode('utf-8')
-    secret = API_SECRET.encode('utf-8')
-    signature = hmac.new(secret, msg=message, digestmod=hashlib.sha256).hexdigest().upper()
-    return nonce, signature
+    nonce = str(int(time.time() * 1000))
+    message = nonce + CUSTOMER_ID + API_KEY
+    signature = hmac.new(
+        API_SECRET.encode('utf-8'), message.encode('utf-8'), hashlib.sha256
+    ).hexdigest().upper()
+    return signature, nonce
 
-# Get current price
-def get_price(pair):
-    response = requests.get(f"{BASE_URL}/ticker/{pair}/")
+
+def get_balance():
+    signature, nonce = create_signature()
+    response = requests.post(f"{BASE_URL}/balance/", data={
+        'key': API_KEY,
+        'signature': signature,
+        'nonce': nonce
+    })
     if response.status_code == 200:
-        data = response.json()
-        return float(data["last"])
+        balance_data = response.json()
+        total_balance_usd = float(balance_data.get("usd_balance", 0))
+        crypto_balances = {}
+        for currency, amount in balance_data.items():
+            if currency.endswith('_balance'):
+                crypto = currency.replace('_balance', '')
+                if crypto in ALLOWED_CURRENCIES:
+                    price = get_price(f"{crypto}usd")
+                    if price:
+                        crypto_balances[crypto] = float(amount) * price
+                        total_balance_usd += float(amount) * price
+        return {"total_balance_usd": round(total_balance_usd, 2), "crypto_balances": crypto_balances}
     return None
 
-# Initialize portfolio
-def initialize_portfolio():
-    balance = get_balance()
-    if "btc" in balance:
-        btc_amount = balance["btc"] / len(INITIAL_CURRENCIES)
-        if btc_amount >= MIN_ORDER_SIZE_BTC:
-            for currency in INITIAL_CURRENCIES:
-                pair = f"{currency}btc"
-                price = get_price(pair)
-                if price:
-                    amount = round(btc_amount / price, 8)  # Calculate how much currency to buy
-                    print(f"Buying {amount} {currency} using {btc_amount} BTC")
-                    buy_currency("btc", currency, amount)
-                else:
-                    print(f"Error fetching price for {pair}, skipping buy.")
-        else:
-            print("Not enough BTC to place the minimum order for all currencies.")
+
+def get_price(pair):
+    response = requests.get(f"{BASE_URL}/ticker/{pair}/")
+    return round(float(response.json()["last"]), 2) if response.status_code == 200 else None
 
 
-# Get total account value in USD
-def get_total_value_in_usd():
-    balance = get_balance()
-    total_value = 0.0
-    for currency, amount in balance.items():
-        if currency == "usd":
-            total_value += amount
-        else:
-            ticker_url = f"{BASE_URL}/ticker/{currency}usd/"
-            response = requests.get(ticker_url)
-            if response.status_code == 200:
-                try:
-                    price_data = response.json()
-                    total_value += amount * float(price_data['last'])
-                except Exception as e:
-                    print(f"Error fetching price for {currency}: {e}")
-    return round(total_value, 2)
-
-
-# Get list of valid trading pairs
-def get_all_trading_pairs():
-    response = requests.get(f"{BASE_URL}/trading-pairs-info/")
-    valid_pairs = []
-    if response.status_code == 200:
-        try:
-            data = response.json()
-            for pair in data:
-                if pair.get("trading") == "Enabled":  # Ensure trading is enabled
-                    valid_pairs.append(pair["name"].replace("/", "").lower())
-        except Exception as e:
-            print("Error parsing trading pairs:", e)
-    return valid_pairs
-
-
-# Get account balance
-def get_balance():
-    nonce, signature = create_signature()
-    payload = {'key': API_KEY, 'signature': signature, 'nonce': nonce}
-    response = requests.post(f"{BASE_URL}/account_balances/", data=payload)
-    try:
-        balance_data = response.json()
-        if isinstance(balance_data, list):
-            balance_dict = {item['currency'].lower(): float(item['available']) for item in balance_data if
-                            float(item['available']) > 0}
-            return balance_dict
-        return balance_data
-    except Exception as e:
-        print("Error parsing balance data:", e)
-        return {"error": "Failed to parse balance data"}
-
-# Get the USD value of a given currency
-def get_usd_value(currency, amount):
-    pair = f"{currency}usd"
-    price = get_price(pair)
-    if price:
-        return amount * price
-    return 0
-
-
-# Place a market buy order
-def buy_currency(from_currency, to_currency, amount):
-    pair = f"{to_currency}{from_currency}".lower()
-    amount = round(amount, 8)  # Ensure max 8 decimal places
-    if amount < MIN_BALANCE_USD:
-        print(f"Skipping buy: Amount {amount} is below minimum trade value.")
-        return None
-    nonce, signature = create_signature()
-    payload = {
-        'key': API_KEY,
-        'signature': signature,
-        'nonce': nonce,
-        'amount': amount,
-    }
-    response = requests.post(f"{BASE_URL}/buy/market/{pair}/", data=payload)
-    result = response.json()
-    transaction_log.append(
-        {"action": "buy", "from": from_currency, "to": to_currency, "amount": amount, "result": result})
-    print(f"Buy order executed: {result}")
-    return result
-
-
-# Place a market sell order
 def sell_currency(from_currency, to_currency, amount):
-    pair = f"{to_currency}{from_currency}".lower()
-    amount = round(amount, 8)  # Ensure max 8 decimal places
-    nonce, signature = create_signature()
-    payload = {
+    if from_currency not in ALLOWED_CURRENCIES or to_currency not in ALLOWED_CURRENCIES:
+        return
+    price = get_price(f"{from_currency}{to_currency}")
+    if not price:
+        return
+    signature, nonce = create_signature()
+    requests.post(f"{BASE_URL}/sell/{from_currency}{to_currency}/", data={
         'key': API_KEY,
         'signature': signature,
         'nonce': nonce,
-        'amount': amount,
-    }
-    response = requests.post(f"{BASE_URL}/sell/market/{pair}/", data=payload)
-    result = response.json()
-    transaction_log.append(
-        {"action": "sell", "from": from_currency, "to": to_currency, "amount": amount, "result": result})
-    print(f"Sell order executed: {result}")
-    return result
+        'amount': round(amount, 2),
+        'price': round(price * 1.005, 2),
+        'type': '1'
+    })
+    transaction_log.append(f"Sold {amount} {from_currency} for {to_currency}")
 
 
-# Trading logic with validation of valid trading pairs
-def trading_loop():
-    global prices, last_trade_time
-    available_pairs = get_all_trading_pairs()
-    valid_currencies = set([pair.replace("usd", "") for pair in available_pairs if pair.endswith("usd")])
+def buy_currency(to_currency, amount):
+    if to_currency not in ALLOWED_CURRENCIES:
+        return
+    price = get_price(f"{to_currency}usd")
+    if not price:
+        return
+    signature, nonce = create_signature()
+    requests.post(f"{BASE_URL}/buy/{to_currency}usd/", data={
+        'key': API_KEY,
+        'signature': signature,
+        'nonce': nonce,
+        'amount': round(amount / price, 2),
+        'price': round(price * 1.005, 2),
+        'type': '0'
+    })
+    transaction_log.append(f"Bought {amount} USD worth of {to_currency}")
+
+
+def ai_crypto_manager():
+    ai_manager = AICryptoManager()
     while True:
-        print("Running trading logic...")
-        try:
-            balance = get_balance()
-            tradable_currencies = [currency for currency in balance if currency not in ["usd", "eur", "btc"]]
+        time.sleep(1800)
+        balance = get_balance()
+        if not balance:
+            continue
+        prices_data = {}
+        for currency in ALLOWED_CURRENCIES:
+            price = get_price(f"{currency}usd")
+            if price:
+                prices_data[currency] = price
+        ai_manager.update_model(list(prices_data.values()))
+        for currency, value in balance["crypto_balances"].items():
+            prediction = ai_manager.predict_next_move(list(prices_data.values()))
+            if prediction and prediction > prices_data.get(currency, 0):
+                buy_currency(currency, value * 0.1)
+            elif value > 5:
+                sell_currency(currency, "usd", value * 0.1)
 
-            price_changes = {}
-            for pair in available_pairs:
-                if pair.endswith("usd"):  # Only consider USD pairs
-                    currency = pair.replace("usd", "")
-                    price = get_price(pair)
-                    if price:
-                        if currency not in prices:
-                            prices[currency] = [price]
-                        else:
-                            prices[currency].append(price)
-                            if len(prices[currency]) > LOOKBACK_PERIOD:
-                                prices[currency].pop(0)
+threading.Thread(target=ai_crypto_manager, daemon=True).start()
 
-                        if len(prices[currency]) >= LOOKBACK_PERIOD:
-                            avg_price = np.mean(prices[currency])
-                            price_change = (prices[currency][-1] - avg_price) / avg_price
-                            price_changes[currency] = price_change
-                            print(
-                                f"Price analysis for {currency}: current={prices[currency][-1]}, avg={avg_price}, change={price_change:.4f}")
-
-            if price_changes:
-                worst_currency = min([c for c in tradable_currencies if c in price_changes], key=price_changes.get,
-                                     default=None)
-                best_currency = max(price_changes, key=price_changes.get)
-
-                if worst_currency and best_currency and worst_currency in balance:
-                    usd_value = get_usd_value(worst_currency, balance[worst_currency])
-                    if usd_value >= MIN_BALANCE_USD:
-                        print(f"Swapping {worst_currency} to {best_currency} for optimization.")
-                        sell_currency(worst_currency, "usd", balance[worst_currency])
-                        balance = get_balance()  # Refresh balance after selling
-                        if "usd" in balance and balance["usd"] >= MIN_BALANCE_USD:
-                            buy_currency("usd", best_currency, balance["usd"])
-                        last_trade_time = time.time()
-                    else:
-                        print("Skipping trade: Insufficient balance for trading.")
-        except Exception as e:
-            print("Error in trading loop:", e)
-        time.sleep(60)
-
-
-# Flask routes
-@app.route('/')
+@app.route("/dashboard")
 def dashboard():
-    return jsonify({"total_value": get_total_value_in_usd(), "current_holdings": get_balance()})
-
-@app.route('/transactions')
-def transactions():
-    return jsonify(transaction_log)
-
-if __name__ == "__main__":
-    print("Checking API Keys...")
-    print("Account Balance:", get_balance())
-    initialize_portfolio()  # Ensure BTC is converted at start
-    trading_thread = threading.Thread(target=trading_loop, daemon=True)
-    trading_thread.start()
-    app.run(debug=True)
+    balance = get_balance()
+    return jsonify({
+        "latest_action": latest_action,
+        "total_balance_usd": balance["total_balance_usd"] if balance else 0.0,
+        "transaction_log": transaction_log
+    })
