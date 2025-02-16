@@ -22,13 +22,13 @@ if not API_KEY or not API_SECRET or not CUSTOMER_ID:
 BASE_URL = "https://www.bitstamp.net/api/v2"
 
 app = Flask(__name__)
-prices = {}
 latest_action = "No action yet"
 nonce_counter = int(time.time() * 1000)
 transaction_log = []
 TRADE_THRESHOLD = 0.005
 LOOKBACK_PERIOD = 5
 ALLOWED_CURRENCIES = {"usd", "btc", "eth", "xrp", "sol", "usdc", "doge", "ada", "link"}
+MIN_TRADE_AMOUNT = 5  # Minimum trade amount in USD
 
 # AI Model for Predicting Market Trends
 class AICryptoManager:
@@ -72,12 +72,12 @@ def get_balance():
         total_balance_usd = float(balance_data.get("usd_balance", 0))
         crypto_balances = {}
         for currency, amount in balance_data.items():
-            if currency.endswith('_balance'):
+            if currency.endswith('_balance') and float(amount) > 0:
                 crypto = currency.replace('_balance', '')
                 if crypto in ALLOWED_CURRENCIES:
                     price = get_price(f"{crypto}usd")
                     if price:
-                        crypto_balances[crypto] = float(amount) * price
+                        crypto_balances[crypto] = float(amount)
                         total_balance_usd += float(amount) * price
         return {"total_balance_usd": round(total_balance_usd, 2), "crypto_balances": crypto_balances}
     return None
@@ -88,30 +88,32 @@ def get_price(pair):
     return round(float(response.json()["last"]), 2) if response.status_code == 200 else None
 
 
-def sell_currency(from_currency, to_currency, amount):
-    if from_currency not in ALLOWED_CURRENCIES or to_currency not in ALLOWED_CURRENCIES:
-        return
-    price = get_price(f"{from_currency}{to_currency}")
-    if not price:
-        return
+def sell_currency(from_currency, amount):
+    balance = get_balance()
+    if not balance or from_currency not in balance["crypto_balances"] or balance["crypto_balances"][from_currency] < amount:
+        return  # Skip if not enough balance
+    price = get_price(f"{from_currency}usd")
+    if not price or amount * price < MIN_TRADE_AMOUNT:
+        return  # Skip trades that are too small
     signature, nonce = create_signature()
-    requests.post(f"{BASE_URL}/sell/{from_currency}{to_currency}/", data={
+    requests.post(f"{BASE_URL}/sell/{from_currency}usd/", data={
         'key': API_KEY,
         'signature': signature,
         'nonce': nonce,
         'amount': round(amount, 2),
-        'price': round(price * 1.005, 2),
+        'price': round(price * 0.995, 2),
         'type': '1'
     })
-    transaction_log.append(f"Sold {amount} {from_currency} for {to_currency}")
+    transaction_log.append(f"Sold {amount} {from_currency} for USD")
 
 
 def buy_currency(to_currency, amount):
-    if to_currency not in ALLOWED_CURRENCIES:
-        return
+    balance = get_balance()
+    if not balance or balance["total_balance_usd"] < amount:
+        return  # Skip if not enough USD balance
     price = get_price(f"{to_currency}usd")
-    if not price:
-        return
+    if not price or amount < MIN_TRADE_AMOUNT:
+        return  # Skip trades that are too small
     signature, nonce = create_signature()
     requests.post(f"{BASE_URL}/buy/{to_currency}usd/", data={
         'key': API_KEY,
@@ -140,9 +142,9 @@ def ai_crypto_manager():
         for currency, value in balance["crypto_balances"].items():
             prediction = ai_manager.predict_next_move(list(prices_data.values()))
             if prediction and prediction > prices_data.get(currency, 0):
-                buy_currency(currency, value * 0.1)
-            elif value > 5:
-                sell_currency(currency, "usd", value * 0.1)
+                buy_currency(currency, min(value * 0.1, balance["total_balance_usd"]))
+            elif value > MIN_TRADE_AMOUNT:
+                sell_currency(currency, value * 0.1)
 
 threading.Thread(target=ai_crypto_manager, daemon=True).start()
 
@@ -154,3 +156,6 @@ def dashboard():
         "total_balance_usd": balance["total_balance_usd"] if balance else 0.0,
         "transaction_log": transaction_log
     })
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
