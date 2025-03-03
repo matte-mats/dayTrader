@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify
 import threading
 from sklearn.ensemble import RandomForestRegressor
+from collections import deque
 
 # Load API keys from .env file
 load_dotenv("key.env")
@@ -26,13 +27,17 @@ latest_action = "No action yet"
 nonce_counter = int(time.time() * 1000)
 transaction_log = []
 TRADE_THRESHOLD = 0.001  # Adjusted to 0.1%
-LOOKBACK_PERIOD = 10  # Increased to 10 data points
+LOOKBACK_PERIOD = 5  # Increased to 10 data points
 MIN_TRADE_AMOUNT = 5  # Minimum trade amount in USD
 TRADE_PERCENTAGE = 0.5  # Increased trade percentage to 50%
 
 # Allowed trading currencies
-TRADE_CURRENCIES = {"btc", "eth", "xrp", "sol", "ltc", "doge", "ada", "hbar", "link", "shib", "matic"}
+TRADE_CURRENCIES = {"btc", "eth", "xrp", "sol", "ltc", "doge", "ada", "hbar", "link", "matic",
+                    "xlm", "trump", "bch", "sui", "pepe", "avax", "aave", "dot", "algo", "popcat"}
 
+# Store historical price data
+price_history = {currency: deque(maxlen=LOOKBACK_PERIOD) for currency in TRADE_CURRENCIES}
+MAX_CRYPTO_HOLDINGS = 5  # Maximum allowed crypto holdings
 
 def create_signature():
     nonce = str(int(time.time() * 1000))
@@ -58,10 +63,45 @@ def get_balance():
         return {"usd": float(balance_data.get("usd_balance", 0)), "crypto": crypto_balances}
     return None
 
-
 def get_price(pair):
     response = requests.get(f"{BASE_URL}/ticker/{pair}/")
-    return round(float(response.json()["last"]), 2) if response.status_code == 200 else None
+    if response.status_code == 200:
+        price = round(float(response.json()["last"]), 8 if "shib" in pair else 2)
+        currency = pair.replace("usd", "")
+        price_history[currency].append(price)
+        return price
+    return None
+
+
+def update_price_history():
+    while True:
+        for currency in TRADE_CURRENCIES:
+            get_price(f"{currency}usd")
+        time.sleep(300)  # Uppdatera var 5:e minut
+
+
+def predict_trend():
+    trends = {}
+    for currency in TRADE_CURRENCIES:
+        if len(price_history[currency]) < LOOKBACK_PERIOD:
+            continue  # Not enough data
+
+        X = np.arange(len(price_history[currency])).reshape(-1, 1)
+        y = np.array(price_history[currency])
+
+        model = RandomForestRegressor(n_estimators=50)
+        model.fit(X, y)
+        prediction = model.predict([[len(price_history[currency])]])
+
+        trends[currency] = (prediction[0] - price_history[currency][-1]) / price_history[currency][-1]
+
+    if not trends:
+        return None, None
+
+    to_sell = min(trends, key=trends.get)  # Most negative trend
+    to_buy = max(trends, key=trends.get)  # Most positive trend
+
+    return to_sell, to_buy
 
 
 def trade_logic():
@@ -73,22 +113,21 @@ def trade_logic():
     usd_balance = balance["usd"]
     active_currencies = set(crypto_balances.keys()) & TRADE_CURRENCIES
 
-    if len(active_currencies) < 3:
-        # Buy more currencies to reach at least 3 different holdings
-        to_buy = TRADE_CURRENCIES - active_currencies
-        if usd_balance > MIN_TRADE_AMOUNT and to_buy:
-            currency = to_buy.pop()
-            buy_currency(currency, usd_balance * TRADE_PERCENTAGE)
-    else:
-        # Sell one and buy another to rotate holdings
-        to_sell = list(active_currencies)[0]  # Pick first currency to sell
-        to_buy = (TRADE_CURRENCIES - active_currencies).pop()  # Pick new currency to buy
-        sell_currency(to_sell, crypto_balances[to_sell] * TRADE_PERCENTAGE)
-        if usd_balance > MIN_TRADE_AMOUNT:
-            buy_currency(to_buy, usd_balance * TRADE_PERCENTAGE)
+    to_sell, to_buy = predict_trend()
+
+    if len(active_currencies) >= MAX_CRYPTO_HOLDINGS:
+        # Too many crypto holdings, sell the worst performer
+        if to_sell in active_currencies:
+            print("sälj av pga för många krypto")
+            sell_currency(to_sell, crypto_balances[to_sell])
+        return  # Stop trading until we have 4 or fewer holdings
+
+    if to_buy in TRADE_CURRENCIES - active_currencies and usd_balance > MIN_TRADE_AMOUNT:
+        buy_currency(to_buy, usd_balance * TRADE_PERCENTAGE)
 
 
 def buy_currency(currency, amount):
+    print("in buy_currency")
     price = get_price(f"{currency}usd")
     if not price or amount < MIN_TRADE_AMOUNT:
         transaction_log.append(f"Skipped buying {currency} due to low trade amount")
@@ -106,6 +145,7 @@ def buy_currency(currency, amount):
 
 
 def sell_currency(currency, amount):
+    print("in sell_currency")
     price = get_price(f"{currency}usd")
     if not price or amount * price < MIN_TRADE_AMOUNT:
         transaction_log.append(f"Skipped selling {currency} due to low trade amount")
@@ -125,11 +165,11 @@ def sell_currency(currency, amount):
 def trading_bot():
     while True:
         trade_logic()
-        time.sleep(3600)  # Run every hour
+        time.sleep(300)  # Run every half hour
 
 
 threading.Thread(target=trading_bot, daemon=True).start()
-
+threading.Thread(target=update_price_history, daemon=True).start()
 
 @app.route("/dashboard")
 def dashboard():
