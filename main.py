@@ -27,13 +27,13 @@ latest_action = "No action yet"
 nonce_counter = int(time.time() * 1000)
 transaction_log = []
 TRADE_THRESHOLD = 0.001  # Adjusted to 0.1%
-LOOKBACK_PERIOD = 5  # Increased to 10 data points
+LOOKBACK_PERIOD = 10  # Increased to 10 data points
 MIN_TRADE_AMOUNT = 5  # Minimum trade amount in USD
 TRADE_PERCENTAGE = 0.5  # Increased trade percentage to 50%
 
 # Allowed trading currencies
 TRADE_CURRENCIES = {"btc", "eth", "xrp", "sol", "ltc", "doge", "ada", "hbar", "link", "matic",
-                    "xlm", "trump", "bch", "sui", "pepe", "avax", "aave", "dot", "algo", "popcat"}
+                    "xlm", "popcat"}
 
 # Store historical price data
 price_history = {currency: deque(maxlen=LOOKBACK_PERIOD) for currency in TRADE_CURRENCIES}
@@ -74,6 +74,7 @@ def get_price(pair):
 
 
 def update_price_history():
+    print("update price history")
     while True:
         for currency in TRADE_CURRENCIES:
             get_price(f"{currency}usd")
@@ -83,6 +84,7 @@ def update_price_history():
 def predict_trend():
     trends = {}
     for currency in TRADE_CURRENCIES:
+        print(f"Checking {currency}, history length: {len(price_history[currency])}")
         if len(price_history[currency]) < LOOKBACK_PERIOD:
             continue  # Not enough data
 
@@ -93,16 +95,22 @@ def predict_trend():
         model.fit(X, y)
         prediction = model.predict([[len(price_history[currency])]])
 
-        trends[currency] = (prediction[0] - price_history[currency][-1]) / price_history[currency][-1]
+        # Säkerhetskontroll: Undvik NaN eller delning med noll
+        last_price = price_history[currency][-1]
+        if last_price == 0 or np.isnan(prediction[0]):
+            print("Undvik NaN eller delning med noll")
+            continue
+
+        trends[currency] = (prediction[0] - last_price) / last_price
 
     if not trends:
+        print("ingen trend")
         return None, None
 
-    to_sell = min(trends, key=trends.get)  # Most negative trend
-    to_buy = max(trends, key=trends.get)  # Most positive trend
+    to_sell = min(trends, key=trends.get)  # Mest negativ trend
+    to_buy = max(trends, key=trends.get)  # Mest positiv trend
 
     return to_sell, to_buy
-
 
 def trade_logic():
     balance = get_balance()
@@ -118,7 +126,7 @@ def trade_logic():
     if len(active_currencies) >= MAX_CRYPTO_HOLDINGS:
         # Too many crypto holdings, sell the worst performer
         if to_sell in active_currencies:
-            print("sälj av pga för många krypto")
+            transaction_log.append("sell " + to_sell + " due to too many crypto holdings...")
             sell_currency(to_sell, crypto_balances[to_sell])
         return  # Stop trading until we have 4 or fewer holdings
 
@@ -165,7 +173,7 @@ def sell_currency(currency, amount):
 def trading_bot():
     while True:
         trade_logic()
-        time.sleep(300)  # Run every half hour
+        time.sleep(1200)  # Run every twenty minutes
 
 
 threading.Thread(target=trading_bot, daemon=True).start()
