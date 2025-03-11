@@ -33,7 +33,7 @@ TRADE_PERCENTAGE = 0.5  # Increased trade percentage to 50%
 
 # Allowed trading currencies
 TRADE_CURRENCIES = {"btc", "eth", "xrp", "sol", "ltc", "doge", "ada", "hbar", "link", "matic",
-                    "xlm", "popcat"}
+                    "xlm", "popcat", "avax", "sui", "smt", "near", "fet"}
 
 # Store historical price data
 price_history = {currency: deque(maxlen=LOOKBACK_PERIOD) for currency in TRADE_CURRENCIES}
