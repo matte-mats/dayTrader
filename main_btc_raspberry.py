@@ -9,10 +9,18 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, jsonify
 
+import os
+
+print("Current directory:", os.getcwd())
+print("key.env exists:", os.path.exists("key.env"))
 # -------------------------
 # Configuration for raspberry pie
 # -------------------------
 load_dotenv("key.env")
+
+print("API_KEY =", os.getenv("BITSTAMP_API_KEY"))
+print("SECRET =", os.getenv("BITSTAMP_API_SECRET"))
+print("CUSTOMER =", os.getenv("BITSTAMP_CUSTOMER_ID"))
 
 API_KEY = os.getenv("BITSTAMP_API_KEY")
 API_SECRET = os.getenv("BITSTAMP_API_SECRET")
