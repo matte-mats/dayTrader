@@ -65,13 +65,93 @@ def get_balance():
 
 def get_price(pair):
     response = requests.get(f"{BASE_URL}/ticker/{pair}/")
-    if response.status_code == 200:
-        price = round(float(response.json()["last"]), 8 if "shib" in pair else 2)
-        currency = pair.replace("usd", "")
-        price_history[currency].append(price)
-        return price
-    return None
+    if response.status_code != 200:
+        return None
 
+    price = round(float(response.json()["last"]), 8 if "shib" in pair else 2)
+
+    currency = pair.replace("usd", "")
+
+    # Spara endast historik för BTC
+    if currency == "btc":
+        price_history["btc"].append(price)
+        if len(price_history["btc"]) > LOOKBACK_PERIOD:
+            price_history["btc"].pop(0)
+
+    return price
+
+
+TRADE_CURRENCIES = {"btc"}
+LOOKBACK_PERIOD = 12          # 12 datapunkter
+PRICE_UPDATE_SECONDS = 300    # var 5:e minut
+BUY_THRESHOLD = 0.003         # +0.1%
+SELL_THRESHOLD = -0.001       # -0.1%
+TRADE_PERCENTAGE = 0.75
+MIN_TRADE_AMOUNT = 5
+
+price_history = {"btc": []}
+
+
+def update_btc_price_history():
+    get_price("btcusd")
+
+
+def btc_trend():
+    prices = price_history["btc"]
+    if len(prices) < LOOKBACK_PERIOD:
+        return None
+
+    first = prices[0]
+    last = prices[-1]
+
+    if first <= 0:
+        return None
+
+    return (last - first) / first
+
+
+def sell_all_non_btc_to_usd():
+    balance = get_balance()
+    if not balance:
+        return
+
+    for currency, amount in balance["crypto"].items():
+        if currency not in {"btc", "usd"}:
+            pair = f"{currency}usd"
+            price = get_price(pair)
+            if price and amount * price >= MIN_TRADE_AMOUNT:
+                sell_currency(currency, amount)
+
+
+def trade_logic():
+    sell_all_non_btc_to_usd()
+
+    update_btc_price_history()
+    trend = btc_trend()
+
+    if trend is None:
+        transaction_log.append("Waiting for enough BTC price history")
+        return
+
+    balance = get_balance()
+    if not balance:
+        return
+
+    usd_balance = balance["usd"]
+    btc_amount = balance["crypto"].get("btc", 0)
+    btc_price = get_price("btcusd")
+    btc_value = btc_amount * btc_price if btc_price else 0
+
+    transaction_log.append(f"BTC trend: {trend:.4%}")
+
+    if trend > BUY_THRESHOLD and usd_balance >= MIN_TRADE_AMOUNT:
+        buy_currency("btc", usd_balance * TRADE_PERCENTAGE)
+
+    elif trend < SELL_THRESHOLD and btc_value >= MIN_TRADE_AMOUNT:
+        sell_currency("btc", btc_amount * TRADE_PERCENTAGE)
+
+    else:
+        transaction_log.append("No trade: trend not strong enough")
 
 def update_price_history():
     print("update price history")
@@ -111,28 +191,6 @@ def predict_trend():
     to_buy = max(trends, key=trends.get)  # Mest positiv trend
 
     return to_sell, to_buy
-
-def trade_logic():
-    balance = get_balance()
-    if not balance:
-        return
-
-    crypto_balances = balance["crypto"]
-    usd_balance = balance["usd"]
-    active_currencies = set(crypto_balances.keys()) & TRADE_CURRENCIES
-
-    to_sell, to_buy = predict_trend()
-
-    if len(active_currencies) >= MAX_CRYPTO_HOLDINGS:
-        # Too many crypto holdings, sell the worst performer
-        if to_sell in active_currencies:
-            transaction_log.append("sell " + to_sell + " due to too many crypto holdings...")
-            sell_currency(to_sell, crypto_balances[to_sell])
-        return  # Stop trading until we have 4 or fewer holdings
-
-    if to_buy in TRADE_CURRENCIES - active_currencies and usd_balance > MIN_TRADE_AMOUNT:
-        buy_currency(to_buy, usd_balance * TRADE_PERCENTAGE)
-
 
 def buy_currency(currency, amount):
     print("in buy_currency")
